@@ -283,17 +283,33 @@ sub pm_name_to_linstor_name {
 }
 
 sub get_dev_path {
-    my ($volname) = @_;
+    my ($volname, $scfg, $nodename) = @_;
 
-    # we have to be a bit careful here, this one is called from contexts where the volname can be a snapname
     die "Not a valid volume name ('$volname')"
       if !valid_name($volname)
       and !valid_snap_name($volname);
 
-    # snapshots and legacy names already have their final name
-    $volname = uuid_strip_vmid($volname) if valid_uuid_name($volname);
+    my $linstor_name = $volname;
+    $linstor_name = uuid_strip_vmid($volname) if valid_uuid_name($volname);
 
-    return "/dev/drbd/by-res/$volname/0";
+    # Try DRBD path first for backward compatibility
+    my $drbd_path = "/dev/drbd/by-res/$linstor_name/0";
+    return $drbd_path if -e $drbd_path;
+
+    # For NVMe resources, activate and query API for device path
+    if (defined($scfg) && defined($nodename)) {
+        my $lsc = linstor($scfg);
+
+        unless ($lsc->resource_exists($linstor_name, $nodename)) {
+            eval { $lsc->activate_resource($linstor_name, $nodename); };
+            die "Could not activate resource $linstor_name on $nodename: $@" if $@;
+        }
+
+        my $device_path = $lsc->get_device_path($linstor_name, $nodename);
+        return $device_path if defined($device_path);
+    }
+
+    return $drbd_path;
 }
 
 
@@ -307,7 +323,7 @@ sub map_volume {
     $volname = volname_and_snap_to_snapname( $linstor_name, $snap )
       if defined($snap);
 
-    return get_dev_path($volname);
+    return get_dev_path($volname, $scfg, PVE::INotify::nodename());
 }
 
 # For APIVER 2
@@ -333,8 +349,7 @@ sub filesystem_path {
     die "filesystem_path: snapshot is not implemented ($snapname)\n" if defined($snapname);
 
     my ( $vtype, $name, $vmid ) = $class->parse_volname($volname);
-
-    my $path = get_dev_path($volname);
+    my $path = get_dev_path($volname, $scfg, PVE::INotify::nodename());
 
     return wantarray ? ( $path, $vmid, $vtype ) : $path;
 }
@@ -566,11 +581,10 @@ sub activate_volume {
     }
 
     my $nodename = PVE::INotify::nodename();
-
     eval { $lsc->activate_resource( $linstor_name, $nodename ); };
     confess $@ if $@;
 
-    system ('blockdev --setrw ' . get_dev_path($volname));
+    system ('blockdev --setrw ' . get_dev_path($volname, $scfg, $nodename));
 
     return undef;
 }
