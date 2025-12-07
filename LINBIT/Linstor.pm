@@ -280,6 +280,25 @@ sub resource_uses_nvme {
     return 0;
 }
 
+sub validate_resource_group_for_nvme {
+    my ( $self, $res_grp_name ) = @_;
+
+    my $ret = $self->{cli}->GET("/v1/resource-groups/$res_grp_name");
+    return unless $ret->responseCode() eq '200';
+
+    my $rg;
+    eval { $rg = decode_json( $ret->responseContent() ); };
+    return if $@;
+
+    my $layer_stack = $rg->{select_filter}{layer_stack} || [];
+    my $has_nvme = grep { uc($_) eq 'NVME' } @$layer_stack;
+    return unless $has_nvme;
+
+    my $place_count = $rg->{select_filter}{place_count} || 0;
+    die "NVMe resource group '$res_grp_name' must have PlaceCount=1 (currently $place_count)\n"
+      . "Multiple NVMe targets would cause data divergence.\n" if $place_count > 1;
+}
+
 sub activate_resource {
     my ( $self, $name, $node_name ) = @_;
 
@@ -500,6 +519,18 @@ sub get_device_path {
 		next unless $res->{name} eq $name && $res->{node_name} eq $node_name;
 		if ($res->{volumes} && @{$res->{volumes}} > 0) {
 			my $device_path = $res->{volumes}[0]{device_path};
+
+			# Workaround: On NVMe target nodes, device_path is None
+			# Use backing_device from NVME layer instead
+			if (!defined($device_path) && $res->{volumes}[0]{layer_data_list}[0]) {
+				my $first_layer = $res->{volumes}[0]{layer_data_list}[0];
+				if ($first_layer->{type} eq 'NVME') {
+					$device_path = $first_layer->{data}{backing_device};
+				} else {
+					die "Expected NVME as first layer but got $first_layer->{type}\n";
+				}
+			}
+
 			# Untaint device path (needed for QEMU in taint mode)
 			if ($device_path && $device_path =~ m{^(/dev/[a-zA-Z0-9/_\-]+)$}) {
 				return $1;

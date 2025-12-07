@@ -442,6 +442,10 @@ sub alloc_image {
         my $res_grp         = get_resource_group($scfg);
         my $local_node_name = get_preferred_local_node($scfg);
         my $exact_size      = get_exact_size($scfg);
+
+        # Validate NVMe resource groups have PlaceCount = 1
+        $lsc->validate_resource_group_for_nvme($res_grp);
+
         if ( defined($local_node_name) ) {
             print "\nNOTICE\n"
               . "  Trying to create diskful resource ($linstor_name) on ($local_node_name).\n";
